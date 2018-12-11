@@ -40,6 +40,7 @@
 #include "at_device/bc95.h"
 #include "usart.h"
 #include "dal_usart.h"
+#include "hal_flash.h"
 
 static UINT32 g_atiny_tskHandle;
 
@@ -128,7 +129,19 @@ void atiny_task_entry(void)
     //demo_nbiot_only();
 	//demo_sht21_iic();
 	dal_usart_test();
-	//fs_test_main();
+	fs_test_main();
+
+#if 0
+    uint8_t buf[16] = {0};
+    uint32_t location = 0x080D0000UL;
+    hal_flash_erase_write("1234567890", 10, location);
+    hal_flash_read(buf, 10, location);
+    printf("falsh = %s\n", buf);
+    hal_flash_erase(location, 1);
+    hal_flash_write("abcdefghij", 10, &location);
+    hal_flash_read(buf, 10, location);
+    printf("falsh = %s\n", buf);
+#endif
 }
 
 
