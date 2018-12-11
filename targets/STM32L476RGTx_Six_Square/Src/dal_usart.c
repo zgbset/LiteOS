@@ -39,6 +39,7 @@
 #include "stm32l4xx_hal_usart.h"
 #include "los_task.h"
 #include "los_queue.h"
+#include "los_sem.h"
 #include "dal_usart.h"
 
 
@@ -119,6 +120,7 @@ static void dal_usart_adapter(uint32_t port)
     }
 }
 
+/*
 int g_dbg_cnt = 0;
 static void dal_usart_irq_handler(dal_usart_handle *arg)
 {
@@ -218,6 +220,7 @@ static void dal_usart_irq_handler(dal_usart_handle *arg)
     }
 #endif
 }
+*/
 
 int32_t dal_usart_init(dal_usart_config *cfg)
 {
@@ -376,10 +379,13 @@ static void dal_usart_recv_task()
 
     while(1)
     {
-        usart_recv_data data = {DAL_USART_RX, 0};
-        UINT32 dlen = sizeof(data);
-#if 0
-        LOS_SemPend(g_sem_handle, LOS_WAIT_FOREVER);
+        //usart_recv_data data = {DAL_USART_RX, 0};
+        //UINT32 dlen = sizeof(data);
+#if 1
+        //LOS_SemPend(g_sem_handle, LOS_WAIT_FOREVER);
+        LOS_SemPend(g_sem_handle, 10000);
+        dal_usart_handle *hdl = &g_usart_handle[0];
+        dal_usart_send(1, hdl->recv_buf, hdl->wp);
 #else
         UINT32 ret = LOS_QueueReadCopy(g_usart_qid, &data, &dlen, LOS_WAIT_FOREVER);
         if(ret != LOS_OK)
@@ -388,7 +394,7 @@ static void dal_usart_recv_task()
         }
 #endif
 
-#if 1
+#if 0
         if (data.type == DAL_USART_QUIT)
         {
             USART_LOG("usart recv task quit");
@@ -501,7 +507,7 @@ int32_t dal_set_usart_recv_callback(uint32_t port, dal_usart_recv_callback cb,
         }
     }
 
-    LOS_SemCreate(0, (UINT32 *)&g_sem_handle);
+    UINT32 res = LOS_SemCreate(0, (UINT32 *)&g_sem_handle);
 
     if (LOS_ERRNO_TSK_ID_INVALID == g_usart_task_id)
     {
@@ -576,11 +582,26 @@ int g_dbg_cb =0;
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     g_dbg_cb++;
+
+    dal_usart_handle *hdl = (dal_usart_handle *)huart;
+
+    hdl->wp++;
+    if (hdl->wp >= MAX_USART_RECV_BUF_LEN)
+    {
+        hdl->wp = 0;
+    }
+
+    (void)HAL_UART_Receive_IT(huart, &hdl->recv_buf[hdl->wp], 1);
+    //(void)LOS_SemPost(g_sem_handle);
+
+
+#if 0
     dal_usart_handle *hdl = (dal_usart_handle *)((char *)huart - LOS_OFF_SET_OF(dal_usart_handle, usart));
     if (hdl >= g_usart_handle && hdl <= &g_usart_handle[MAX_USART_NUM-1])
     {
         dal_usart_irq_handler(hdl);
     }
+#endif
 }
 
 #if defined ( __CC_ARM ) || defined ( __ICCARM__ )  /* KEIL and IAR: printf will call fputc to print */
