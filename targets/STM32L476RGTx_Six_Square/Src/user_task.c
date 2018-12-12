@@ -91,6 +91,7 @@ void atiny_usart1_rx_entry(void)
 static void usart_recv_callback(uint32_t port, uint8_t *buf, uint32_t len)
 {
     dal_usart_send(port, buf, len);
+    printf("\n");
 }
 
 static void dal_usart_test(void)
@@ -113,7 +114,7 @@ static void dal_usart_test(void)
     unsigned char buf[] = "hello world";
     ret = dal_usart_send(1, buf, sizeof(buf)-1);
     printf("\nwait for input\n");
-    //ret = dal_usart_recv(1, buf, 5, 5000);
+    //ret = dal_usart_recv(1, buf, 1, 6000);
     //printf("ret=%d, buf=%s\n", ret, buf);
     ret = dal_set_usart_recv_callback(1, usart_recv_callback, 1, 5);
 
@@ -129,7 +130,7 @@ void atiny_task_entry(void)
     //demo_nbiot_only();
 	//demo_sht21_iic();
 	dal_usart_test();
-	fs_test_main();
+	//fs_test_main();
 
 #if 0
     uint8_t buf[16] = {0};

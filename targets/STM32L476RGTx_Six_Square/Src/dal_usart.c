@@ -64,7 +64,6 @@ typedef struct
     uint32_t irqn;
     uint8_t *recv_buf;
     uint32_t rp_cb;
-    uint32_t rp_bk;
     uint32_t wp;
     dal_usart_recv_callback cb;
     int32_t break_type;
@@ -117,6 +116,80 @@ static void dal_usart_adapter(uint32_t port)
         break;
     default:
         break;
+    }
+}
+
+static uint32_t copy_usart_recv_data(uint8_t *buf, usart_recv_data *data)
+{
+    uint32_t len = 0;
+    dal_usart_handle *hdl = &g_usart_handle[data->port-1];
+
+    if (data->end == data->ori)
+    {
+        len = 0;
+    }
+    else if (data->end > data->ori)
+    {
+        len = data->end - data->ori;
+        memcpy(buf, &hdl->recv_buf[data->ori], len);
+    }
+    else
+    {
+        uint32_t tmp_len = MAX_USART_RECV_BUF_LEN - data->ori;
+        memcpy(buf, &hdl->recv_buf[data->ori], tmp_len);
+        memcpy(buf + tmp_len, hdl->recv_buf, data->end);
+        len = data->end + tmp_len;
+    }
+
+    hdl->rp_cb = data->end;
+
+    return len;
+}
+
+static void check_and_report_data(dal_usart_handle *hdl, uint8_t *buf)
+{
+    int flag = 0;
+    uint32_t rp = hdl->rp_cb;
+    uint32_t wp = hdl->wp;
+
+    if (hdl->break_type == 1)
+    {
+        uint32_t alen = (wp + MAX_USART_RECV_BUF_LEN - rp) % MAX_USART_RECV_BUF_LEN;
+        while (alen >= hdl->break_condition)
+        {
+            usart_recv_data data = {0};
+            uint32_t tmp = (rp + hdl->break_condition) % MAX_USART_RECV_BUF_LEN;
+
+            data.port = hdl - g_usart_handle + 1;
+            data.ori = rp;
+            data.end = tmp;
+            hdl->rp_cb = tmp;
+            rp = tmp;
+            alen -= hdl->break_condition;
+
+            uint32_t len = copy_usart_recv_data(buf, &data);
+            hdl->cb(data.port, buf, len);
+        }
+    }
+    else if (hdl->break_type == 1)
+    {
+        uint8_t c = hdl->recv_buf[wp];
+        if (c == (uint8_t)hdl->break_condition)
+        {
+            flag = 1;
+        }
+    }
+
+    if (flag)
+    {
+        usart_recv_data data = {0};
+        data.port = hdl - g_usart_handle + 1;
+        data.ori = rp;
+        data.end = wp;
+        hdl->rp_cb = wp;
+
+        uint32_t len = copy_usart_recv_data(buf, &data);
+        hdl->cb(data.port, buf, len);
     }
 }
 
@@ -322,50 +395,14 @@ int32_t dal_usart_send(uint32_t port, uint8_t *buf, uint32_t len)
 
 int32_t dal_usart_recv(uint32_t port, uint8_t *buf, uint32_t len, uint32_t timeout)
 {
-    if (port - 1 >= MAX_USART_NUM)
+    if (port - 1 >= MAX_USART_NUM || NULL == buf || 0 == len)
     {
         return -1;
     }
 
-    dal_usart_handle *hdl = &g_usart_handle[port-1];
-    UART_HandleTypeDef *usart = &hdl->usart;
-    HAL_StatusTypeDef res = HAL_UART_Receive(usart, buf, len, timeout);
-    if (res == HAL_OK)
-    {
-        hdl->rp_bk += len;
-        return 0;
-    }
-    else
-    {
-        return -1;
-    }
-}
-
-static uint32_t copy_usart_recv_data(uint8_t *buf, usart_recv_data *data)
-{
-    uint32_t len = 0;
-    dal_usart_handle *hdl = &g_usart_handle[data->port-1];
-
-    if (data->end == data->ori)
-    {
-        len = 0;
-    }
-    else if (data->end > data->ori)
-    {
-        len = data->end - data->ori;
-        memcpy(buf, &hdl->recv_buf[data->ori], len);
-    }
-    else
-    {
-        uint32_t tmp_len = MAX_USART_RECV_BUF_LEN - data->ori;
-        memcpy(buf, &hdl->recv_buf[data->ori], tmp_len);
-        memcpy(buf + tmp_len, hdl->recv_buf, data->end);
-        len = data->end + tmp_len;
-    }
-
-    hdl->rp_cb = data->end;
-
-    return len;
+    UART_HandleTypeDef *usart = &g_usart_handle[port-1].usart;
+    (void)HAL_UART_Receive(usart, buf, len, timeout);
+    return len - usart->RxXferCount;
 }
 
 static void dal_usart_recv_task()
@@ -383,9 +420,17 @@ static void dal_usart_recv_task()
         //UINT32 dlen = sizeof(data);
 #if 1
         //LOS_SemPend(g_sem_handle, LOS_WAIT_FOREVER);
-        LOS_SemPend(g_sem_handle, 10000);
-        dal_usart_handle *hdl = &g_usart_handle[0];
-        dal_usart_send(1, hdl->recv_buf, hdl->wp);
+        LOS_SemPend(g_sem_handle, 10);
+        for (int i = 0; i < MAX_USART_NUM; i++)
+        {
+            dal_usart_handle *hdl = &g_usart_handle[i];
+            if (hdl->cb && hdl->recv_buf)
+            {
+                check_and_report_data(hdl, buf);
+            }
+            //dal_usart_send(i+1, hdl->recv_buf, hdl->wp);
+        }
+
 #else
         UINT32 ret = LOS_QueueReadCopy(g_usart_qid, &data, &dlen, LOS_WAIT_FOREVER);
         if(ret != LOS_OK)
