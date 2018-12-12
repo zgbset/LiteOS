@@ -55,8 +55,9 @@
 /* Defines ------------------------------------------------------------------*/
 #define SPI_FLASH_ID            0xEF4018
 
-#define SPI_FLASH_SECTOR_SIZE   (2 * 1024)
-#define SPI_FLASH_PAGE_SIZE     256
+//#define SPI_FLASH_SECTOR_SIZE   (2 * 1024)
+#define SPI_FLASH_SECTOR_SIZE   512
+
 /* Typedefs -----------------------------------------------------------------*/
 /* Macros -------------------------------------------------------------------*/
 /* Local variables ----------------------------------------------------------*/
