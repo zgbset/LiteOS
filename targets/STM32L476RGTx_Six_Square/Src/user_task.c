@@ -90,14 +90,14 @@ void atiny_usart1_rx_entry(void)
 
 static void usart_recv_callback(uint32_t port, uint8_t *buf, uint32_t len)
 {
-    dal_usart_send(port, buf, len);
+    dal_usart_send(port, buf, len, 0xffff);
     printf("\n");
 }
 
 static void dal_usart_test(void)
 {
     int ret = 0;
-    dal_usart_config cfg =
+    uds_usart_cfg cfg =
     {
         .port = 1,
         .baudrate = 115200,
@@ -112,7 +112,7 @@ static void dal_usart_test(void)
     ret = dal_usart_init(&cfg);
 
     unsigned char buf[] = "hello world";
-    ret = dal_usart_send(1, buf, sizeof(buf)-1);
+    ret = dal_usart_send(1, buf, sizeof(buf)-1, 0xffff);
     printf("\nwait for input\n");
     //ret = dal_usart_recv(1, buf, 5, 5000);
     //printf("ret=%d, buf=%s\n", ret, buf);
@@ -124,13 +124,15 @@ static void dal_usart_test(void)
 void atiny_task_entry(void)
 {
     //atiny_usart1_rx_entry();
+    extern void demo_usart(void);
 	extern void demo_nbiot_only();
 	extern void demo_sht21_iic(void);
 	extern void demo_gpio (void);
 	extern int fs_test_main(void);
+
     //demo_nbiot_only();
-	
-	dal_usart_test();
+    demo_usart();
+	//dal_usart_test();
     //fs_test_main();
 	//need to initializes UART1 for printf function.
 	//demo_gpio();
