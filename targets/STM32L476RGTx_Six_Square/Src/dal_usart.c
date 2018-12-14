@@ -55,7 +55,7 @@
 #endif
 
 #define MAX_USART_NUM 3
-#define MAX_USART_RECV_BUF_LEN 1024
+#define MAX_USART_RECV_BUF_LEN 2048
 
 
 /* Typedefs -----------------------------------------------------------------*/
@@ -65,7 +65,7 @@ typedef struct
     UART_HandleTypeDef usart;
     uint32_t irqn;
     uint8_t *recv_buf;
-    uint32_t rp_cb;
+    uint32_t rp;
     uint32_t wp;
     uds_usart_recv_callback cb;
     int32_t break_type;
@@ -75,7 +75,7 @@ typedef struct
 typedef enum
 {
     DAL_USART_RX,
-    DAL_USART_QUIT
+    DAL_USART_EXIT
 } usart_data_type;
 
 typedef struct
@@ -91,14 +91,15 @@ typedef struct
 
 static dal_usart_handle g_usart_handle[MAX_USART_NUM];
 static uint32_t g_usart_task_id = LOS_ERRNO_TSK_ID_INVALID;
-static uint32_t g_usart_qid = LOS_ERRNO_QUEUE_INVALID;
+//static uint32_t g_usart_qid = LOS_ERRNO_QUEUE_INVALID;
+static uint32_t g_sem_handle = LOS_ERRNO_SEM_INVALID;
 static uint32_t g_active_usart_cnt = 0;
-static uint32_t g_sem_handle = 0;
+static uint32_t g_recv_task_exit = 0;
 
 
 /* Public functions ---------------------------------------------------------*/
 
-static void dal_usart_adapter(uint32_t port)
+static void usart_port_adapter(uint32_t port)
 {
     dal_usart_handle *hdl = &g_usart_handle[port-1];
 
@@ -121,7 +122,7 @@ static void dal_usart_adapter(uint32_t port)
     }
 }
 
-static uint32_t copy_usart_recv_data(uint8_t *buf, usart_recv_data *data)
+static uint32_t usart_copy_recv_data(uint8_t *buf, usart_recv_data *data)
 {
     uint32_t len = 0;
     dal_usart_handle *hdl = &g_usart_handle[data->port-1];
@@ -143,55 +144,58 @@ static uint32_t copy_usart_recv_data(uint8_t *buf, usart_recv_data *data)
         len = data->end + tmp_len;
     }
 
-    hdl->rp_cb = data->end;
+    hdl->rp = data->end;
 
     return len;
 }
 
-static void check_and_report_data(dal_usart_handle *hdl, uint8_t *buf)
+static void usart_report_data(dal_usart_handle *hdl, uint8_t *buf)
 {
-    int flag = 0;
-    uint32_t rp = hdl->rp_cb;
+    uint32_t rp = hdl->rp;
     uint32_t wp = hdl->wp;
+    uint32_t rp_cur = 0;
+    uint32_t tlen = (wp + MAX_USART_RECV_BUF_LEN - rp) % MAX_USART_RECV_BUF_LEN;
+    usart_recv_data data = {DAL_USART_RX};
+
+    data.port = hdl - g_usart_handle + 1;
 
     if (hdl->break_type == 1)
     {
-        uint32_t alen = (wp + MAX_USART_RECV_BUF_LEN - rp) % MAX_USART_RECV_BUF_LEN;
-        while (alen >= hdl->break_cond)
+        while (tlen >= hdl->break_cond)
         {
-            usart_recv_data data = {DAL_USART_RX};
-            uint32_t tmp = (rp + hdl->break_cond) % MAX_USART_RECV_BUF_LEN;
+            rp_cur = (rp + hdl->break_cond) % MAX_USART_RECV_BUF_LEN;
 
-            data.port = hdl - g_usart_handle + 1;
             data.ori = rp;
-            data.end = tmp;
-            hdl->rp_cb = tmp;
-            rp = tmp;
-            alen -= hdl->break_cond;
+            data.end = rp_cur;
+            hdl->rp = rp_cur;
+            rp = rp_cur;
+            tlen -= hdl->break_cond;
 
-            uint32_t len = copy_usart_recv_data(buf, &data);
+            uint32_t len = usart_copy_recv_data(buf, &data);
             hdl->cb(data.port, buf, len);
         }
     }
-    else if (hdl->break_type == 1)
+    else if (hdl->break_type == 2)
     {
-        uint8_t c = hdl->recv_buf[wp];
-        if (c == (uint8_t)hdl->break_cond)
+        rp_cur = rp;
+
+        while ((int32_t)tlen > 0 && rp_cur != wp)
         {
-            flag = 1;
+            uint8_t c = hdl->recv_buf[rp_cur++];
+            rp_cur %= MAX_USART_RECV_BUF_LEN;
+
+            if (c == (uint8_t)hdl->break_cond)
+            {
+                data.ori = rp;
+                data.end = rp_cur;
+                hdl->rp = rp_cur;
+                rp = rp_cur;
+
+                uint32_t len = usart_copy_recv_data(buf, &data);
+                hdl->cb(data.port, buf, len);
+                tlen -= len;
+            }
         }
-    }
-
-    if (flag)
-    {
-        usart_recv_data data = {DAL_USART_RX};
-        data.port = hdl - g_usart_handle + 1;
-        data.ori = rp;
-        data.end = wp;
-        hdl->rp_cb = wp;
-
-        uint32_t len = copy_usart_recv_data(buf, &data);
-        hdl->cb(data.port, buf, len);
     }
 }
 
@@ -213,7 +217,7 @@ static void dal_usart_irq_handler(dal_usart_handle *arg)
 
     if (hdl->break_type == 1)
     {
-        uint32_t len = (hdl->wp + MAX_USART_RECV_BUF_LEN - hdl->rp_cb) % MAX_USART_RECV_BUF_LEN;
+        uint32_t len = (hdl->wp + MAX_USART_RECV_BUF_LEN - hdl->rp) % MAX_USART_RECV_BUF_LEN;
         if (len >= hdl->break_cond)
         {
             flag = 1;
@@ -232,9 +236,9 @@ static void dal_usart_irq_handler(dal_usart_handle *arg)
         usart_recv_data data;
         data.type = DAL_USART_RX;
         data.port = hdl - g_usart_handle + 1;
-        data.ori = hdl->rp_cb;
+        data.ori = hdl->rp;
         data.end = hdl->wp;
-        hdl->rp_cb = hdl->wp;
+        hdl->rp = hdl->wp;
 
 #if 0
         (void)LOS_SemPost(g_sem_handle);
@@ -261,7 +265,7 @@ static void dal_usart_irq_handler(dal_usart_handle *arg)
 
         if (hdl->break_type == 1)
         {
-            uint32_t len = (hdl->wp + MAX_USART_RECV_BUF_LEN - hdl->rp_cb) % MAX_USART_RECV_BUF_LEN;
+            uint32_t len = (hdl->wp + MAX_USART_RECV_BUF_LEN - hdl->rp) % MAX_USART_RECV_BUF_LEN;
             if (len >= hdl->break_cond)
             {
                 flag = 1;
@@ -280,7 +284,7 @@ static void dal_usart_irq_handler(dal_usart_handle *arg)
             usart_recv_data data;
             data.type = DAL_USART_RX;
             data.port = hdl - g_usart_handle;
-            data.ori = hdl->rp_cb;
+            data.ori = hdl->rp;
             data.end = hdl->wp;
 
             if(LOS_QueueWriteCopy(g_usart_qid, &data, sizeof(data), 0) != LOS_OK)
@@ -314,7 +318,7 @@ int32_t dal_usart_init(uds_usart_cfg *cfg)
         return -1;
     }
 
-    dal_usart_adapter(cfg->port);
+    usart_port_adapter(cfg->port);
 
     usart->Init.BaudRate = cfg->baudrate;
     usart->Init.WordLength = cfg->word_length;
@@ -350,15 +354,22 @@ int32_t dal_usart_deinit(uint32_t port)
     __HAL_UART_DISABLE_IT(usart, UART_IT_RXNE);
 
     g_active_usart_cnt--;
-    if (g_active_usart_cnt == 0 && g_usart_qid != LOS_ERRNO_QUEUE_INVALID)
+    if (g_active_usart_cnt == 0)
     {
-        usart_recv_data data = {DAL_USART_QUIT, 0};
-        data.port = port;
+        g_recv_task_exit = 1;
 
-        if(LOS_QueueWriteCopy(g_usart_qid, &data, sizeof(data), 0) != LOS_OK)
+#if 0
+        if (g_usart_qid != LOS_ERRNO_QUEUE_INVALID)
         {
-            USART_LOG("LOS_QueueWriteCopy failed!");
+            usart_recv_data data = {DAL_USART_EXIT, 0};
+            data.port = port;
+
+            if(LOS_QueueWriteCopy(g_usart_qid, &data, sizeof(data), 0) != LOS_OK)
+            {
+                USART_LOG("LOS_QueueWriteCopy failed!");
+            }
         }
+#endif
     }
 
     if (hdl->recv_buf)
@@ -394,7 +405,7 @@ int32_t dal_usart_recv(uint32_t port, uint8_t *buf, uint32_t len, uint32_t timeo
     return len - usart->RxXferCount;
 }
 
-static void dal_usart_recv_task()
+static void usart_recv_task()
 {
     uint8_t *buf = (uint8_t *)malloc(MAX_USART_RECV_BUF_LEN);
     if (NULL == buf)
@@ -410,14 +421,20 @@ static void dal_usart_recv_task()
 #if 1
         //LOS_SemPend(g_sem_handle, LOS_WAIT_FOREVER);
         LOS_SemPend(g_sem_handle, 100);
+
+        if (g_recv_task_exit)
+        {
+            USART_LOG("usart recv task exit");
+            break;
+        }
+
         for (int i = 0; i < MAX_USART_NUM; i++)
         {
             dal_usart_handle *hdl = &g_usart_handle[i];
             if (hdl->cb && hdl->recv_buf)
             {
-                check_and_report_data(hdl, buf);
+                usart_report_data(hdl, buf);
             }
-            //dal_usart_send(i+1, hdl->recv_buf, hdl->wp, 0xffff);
         }
 
 #else
@@ -429,7 +446,7 @@ static void dal_usart_recv_task()
 #endif
 
 #if 0
-        if (data.type == DAL_USART_QUIT)
+        if (data.type == DAL_USART_EXIT)
         {
             USART_LOG("usart recv task quit");
             break;
@@ -442,7 +459,7 @@ static void dal_usart_recv_task()
         }
 
         memset(buf, 0, MAX_USART_RECV_BUF_LEN);
-        uint32_t len = copy_usart_recv_data(buf, &data);
+        uint32_t len = usart_copy_recv_data(buf, &data);
 
         if (len <= 0)
         {
@@ -466,21 +483,29 @@ static void dal_usart_recv_task()
         buf = NULL;
     }
 
+    if (LOS_ERRNO_SEM_INVALID != g_sem_handle)
+    {
+        (void)LOS_SemDelete(g_sem_handle);
+        g_sem_handle = LOS_ERRNO_SEM_INVALID;
+    }
+
+#if 0
     if (LOS_ERRNO_QUEUE_INVALID != g_usart_qid)
     {
         (void)LOS_QueueDelete(g_usart_qid);
         g_usart_qid = LOS_ERRNO_QUEUE_INVALID;
     }
+#endif
 }
 
-static uint32_t dal_usart_create_recv_task(void)
+static uint32_t usart_create_recv_task(void)
 {
     uint32_t ret = LOS_OK;
     TSK_INIT_PARAM_S task_init_param;
 
     task_init_param.usTaskPrio = 2;
     task_init_param.pcName = "usart_recv_task";
-    task_init_param.pfnTaskEntry = (TSK_ENTRY_FUNC)dal_usart_recv_task;
+    task_init_param.pfnTaskEntry = (TSK_ENTRY_FUNC)usart_recv_task;
     task_init_param.uwStackSize = 0x2000;
 
     ret = LOS_TaskCreate((UINT32 *)&g_usart_task_id, &task_init_param);
@@ -531,6 +556,17 @@ int32_t dal_set_usart_recv_callback(uint32_t port, uds_usart_recv_callback cb,
     hdl->break_type = break_type;
     hdl->break_cond = break_cond;
 
+    if (LOS_ERRNO_SEM_INVALID == g_sem_handle)
+    {
+        ret = LOS_SemCreate(0, (UINT32 *)&g_sem_handle);
+        if (ret != LOS_OK)
+        {
+            USART_LOG("init usart recv semaphore failed: %d", ret);
+            return -1;
+        }
+    }
+
+#if 0
     if (LOS_ERRNO_QUEUE_INVALID == g_usart_qid)
     {
         ret = LOS_QueueCreate("UsartRecvQueue", 16, (UINT32 *)&g_usart_qid, 0, sizeof(usart_recv_data));
@@ -540,20 +576,27 @@ int32_t dal_set_usart_recv_callback(uint32_t port, uds_usart_recv_callback cb,
             return -1;
         }
     }
-
-    UINT32 res = LOS_SemCreate(0, (UINT32 *)&g_sem_handle);
+#endif
 
     if (LOS_ERRNO_TSK_ID_INVALID == g_usart_task_id)
     {
-        if(LOS_OK != dal_usart_create_recv_task())
+        if(LOS_OK != usart_create_recv_task())
         {
+            if (LOS_ERRNO_SEM_INVALID != g_sem_handle)
+            {
+                (void)LOS_SemDelete(g_sem_handle);
+                g_sem_handle = LOS_ERRNO_SEM_INVALID;
+            }
+
+#if 0
             if (LOS_ERRNO_QUEUE_INVALID != g_usart_qid)
             {
                 (void)LOS_QueueDelete(g_usart_qid);
                 g_usart_qid = LOS_ERRNO_QUEUE_INVALID;
             }
+#endif
 
-            USART_LOG("create dal_usart_create_recv_task failed!");
+            USART_LOG("create usart_create_recv_task failed!");
             return -1;
         }
     }
@@ -640,6 +683,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 #endif
 }
 
+uint32_t HAL_GetTick(void)
+{
+    return (uint32_t)LOS_TickCountGet();
+}
+
 #if defined ( __CC_ARM ) || defined ( __ICCARM__ )  /* KEIL and IAR: printf will call fputc to print */
 int fputc(int ch, FILE *f)
 {
@@ -648,14 +696,9 @@ int fputc(int ch, FILE *f)
 }
 #endif
 
-uint32_t HAL_GetTick(void)
+static s32_t uds_usart_open(void *pri, s32_t flag)
 {
-    return (uint32_t)LOS_TickCountGet();
-}
-
-static bool_t uds_usart_open(void *pri, s32_t flag)
-{
-    return true;
+    return 0;
 }
 
 static s32_t uds_usart_read(void *pri, u32_t offset, u8_t *buf, s32_t len, u32_t timeout)
@@ -678,19 +721,19 @@ static void uds_usart_close(void *pri)
 {
 }
 
-static bool_t uds_usart_ioctl(void *pri, u32_t cmd, void *para, s32_t len)
+static s32_t uds_usart_ioctl(void *pri, u32_t cmd, void *para, s32_t len)
 {
     dal_usart_handle *hdl = (dal_usart_handle *)pri;
     uint32_t port = hdl - g_usart_handle + 1;
     uds_usart_cb_cfg *cb_cfg = NULL;
-    int ret = 0;
+    int32_t ret = 0;
 
     switch (cmd)
     {
     case USART_SET_RECV_CALLBACK:
         if (NULL == para || len != sizeof(uds_usart_cb_cfg))
         {
-            return false;
+            return -1;
         }
 
         cb_cfg = (uds_usart_cb_cfg *)para;
@@ -704,15 +747,15 @@ static bool_t uds_usart_ioctl(void *pri, u32_t cmd, void *para, s32_t len)
         break;
 
     default:
-        return false;
+        return -1;
     }
 
-    return true;
+    return ret;
 }
 
-static bool_t uds_usart_init(void *pri)
+static s32_t uds_usart_init(void *pri)
 {
-    return true;
+    return 0;
 }
 
 static void uds_usart_deinit(void *pri)
@@ -761,7 +804,7 @@ s32_t uds_usart_dev_install(const char *name, void *para)
     return 0;
 }
 
-static void usart_recv_callback(uint32_t port, uint8_t *buf, uint32_t len)
+static void demo_recv_callback(uint32_t port, uint8_t *buf, uint32_t len)
 {
     dal_usart_send(port, buf, len, 0xffff);
     printf("\n");
@@ -799,9 +842,9 @@ void demo_usart(void)
     //printf("ret=%d, buf=%s\n", ret, buf);
     uds_usart_cb_cfg cb_cfg =
     {
-        .cb = usart_recv_callback,
-        .break_type = 1,
-        .break_cond = 5,
+        .cb = demo_recv_callback,
+        .break_type = 1,//2,
+        .break_cond = 5,//'0',
     };
     uds_dev_ioctl(dev, USART_SET_RECV_CALLBACK, (void *)&cb_cfg, sizeof(cb_cfg));
 }
